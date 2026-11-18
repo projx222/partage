@@ -1,0 +1,53 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer"><title>Fichier partagé</title><link rel="icon" href="data:,"><style>
+:root{--fond:#efeae2;--carte:#fff;--texte:#111b21;--doux:#667781;--accent:#0a8f7f;--alerte:#b3261e}
+@media (prefers-color-scheme:dark){:root{--fond:#0b141a;--carte:#111b21;--texte:#e9edef;--doux:#8696a0;--accent:#00a884;--alerte:#f2b8b5}}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--fond);color:var(--texte);font:16px/1.4 system-ui,sans-serif}
+main{width:min(92vw,440px);background:var(--carte);border-radius:14px;padding:26px 24px;box-shadow:0 2px 14px rgba(0,0,0,.14)}
+h1{margin:0 0 4px;font-size:24px}p{color:var(--doux);margin:6px 0 16px}b{word-break:break-all}
+button{width:100%;padding:13px;border:0;border-radius:10px;background:var(--accent);color:#fff;font:inherit;font-weight:600}button:disabled{opacity:.5}
+</style></head><body><main><h1>Fichier partagé</h1><p>Quelqu'un te partage un fichier. Il est chiffré : il est déchiffré dans ton navigateur, avec la clé contenue dans le lien.</p><p><b id="nom"></b></p><button id="aller">Recevoir le fichier</button><p id="etat"></p><script>
+const $ = i => document.getElementById(i), dire = t => { $("etat").textContent = t; };
+const b64 = t => Uint8Array.from(atob(t.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+async function recevoir(adresse, ident, brut) {
+  if (brut.length !== 16) { dire("Lien incomplet : la clé (après le #) manque."); return; }
+  $("aller").disabled = true; dire("Connexion à l'appareil qui héberge le fichier…");
+  let r; try { r = await fetch(adresse, {cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer"}); } catch (e) { dire("Connexion impossible."); $("aller").disabled = false; return; }
+  if (!r.ok) { dire(await r.text()); $("aller").disabled = false; return; }
+  const cle = await crypto.subtle.importKey("raw", brut, "AES-GCM", false, ["decrypt"]), aad = new TextEncoder().encode(ident);
+  const lecteur = r.body.getReader(), morceaux = []; let tampon = new Uint8Array(0), n = 0, meta = null, recu = 0, fini = false;
+  const ouvrir = async data => { const iv = new Uint8Array(12); new DataView(iv.buffer).setUint32(8, n % 4294967296); new DataView(iv.buffer).setUint32(4, Math.floor(n / 4294967296)); n++;
+    return new Uint8Array(await crypto.subtle.decrypt({name: "AES-GCM", iv, additionalData: aad}, cle, data)); };
+  try {
+    while (!fini) {
+      const {done, value} = await lecteur.read(); if (done) break;
+      const t = new Uint8Array(tampon.length + value.length); t.set(tampon); t.set(value, tampon.length); tampon = t;
+      while (tampon.length >= 4) {
+        const l = new DataView(tampon.buffer, tampon.byteOffset).getUint32(0);
+        if (l === 0) { fini = true; break; }
+        if (l > 1048576) throw new Error("flux");
+        if (tampon.length < 4 + l) break;
+        const clair = await ouvrir(tampon.slice(4, 4 + l)); tampon = tampon.slice(4 + l);
+        if (meta === null) { meta = JSON.parse(new TextDecoder().decode(clair)); $("nom").textContent = meta.nom; }
+        else { morceaux.push(clair); recu += clair.length; dire("Réception : " + Math.floor(100 * recu / Math.max(1, meta.taille)) + " %"); }
+      }
+    }
+  } catch (e) { dire("Déchiffrement impossible : le lien n'est pas le bon, ou le transfert a été coupé."); $("aller").disabled = false; return; }
+  if (!fini || meta === null || recu !== meta.taille) { dire("Transfert interrompu : l'appareil qui héberge le fichier s'est déconnecté. Réessaie."); $("aller").disabled = false; return; }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(morceaux)); a.download = String(meta.nom).replace(/[\/:*?"<>|\x00-\x1f]/g, "_") || "fichier"; document.body.append(a); a.click();
+  dire("Fichier reçu et déchiffré dans ton navigateur.");
+}
+
+$("aller").onclick = async () => {
+  const parts = location.hash.slice(1).split("."); let brut, cp;
+  try { brut = b64(parts[1] || ""); cp = b64(parts[2] || ""); } catch (e) { brut = new Uint8Array(0); cp = new Uint8Array(0); }
+  if (parts.length !== 3 || !/^[A-Za-z0-9_-]{8,16}$/.test(parts[0]) || brut.length !== 16 || cp.length !== 16) { dire("Lien incomplet."); return; }
+  let base;
+  try {
+    const r = await fetch("a.json", {cache: "no-store"}); if (!r.ok) throw new Error("absent");
+    const c = b64((await r.json()).c), k = await crypto.subtle.importKey("raw", cp, "AES-GCM", false, ["decrypt"]);
+    base = new TextDecoder().decode(await crypto.subtle.decrypt({name: "AES-GCM", iv: c.slice(0, 12), additionalData: new TextEncoder().encode("pointeur-v1")}, k, c.slice(12)));
+    if (!/^https:\/\/[^\s"'<>#]+\/$/.test(base)) throw new Error("adresse");
+  } catch (e) { dire("Ce lien n'est plus valable."); return; }
+  recevoir(base + "p/" + parts[0] + "/d", parts[0], brut); };
+</script></main></body></html>
