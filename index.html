@@ -6,16 +6,24 @@ body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--
 main{width:min(92vw,440px);background:var(--carte);border-radius:14px;padding:26px 24px;box-shadow:0 2px 14px rgba(0,0,0,.14)}
 h1{margin:0 0 4px;font-size:24px}p{color:var(--doux);margin:6px 0 16px}b{word-break:break-all}
 button{width:100%;padding:13px;border:0;border-radius:10px;background:var(--accent);color:#fff;font:inherit;font-weight:600}button:disabled{opacity:.5}
-</style></head><body><main><h1>Fichier partagé</h1><p>Quelqu'un te partage un fichier. Il est chiffré : il est déchiffré dans ton navigateur, avec la clé contenue dans le lien.</p><p><b id="nom"></b></p><button id="aller">Recevoir le fichier</button><p id="etat"></p><script>
+input{width:100%;box-sizing:border-box;padding:12px;border:1px solid var(--doux);border-radius:10px;background:none;color:inherit;font:inherit}[hidden]{display:none}
+</style></head><body><main><h1>Fichier partagé</h1><p>Quelqu'un te partage un fichier. Il est chiffré : il est déchiffré dans ton navigateur, avec la clé contenue dans le lien.</p><p><b id="nom"></b></p><p id="zmdp" hidden><input id="mdp" type="password" placeholder="Mot de passe" autocomplete="off"></p><button id="aller">Recevoir le fichier</button><p id="etat"></p><script>
 const $ = i => document.getElementById(i), dire = t => { $("etat").textContent = t; };
 const b64 = t => Uint8Array.from(atob(t.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+async function cleProtegee(brut, ident, mdp) {
+  const sel = new Uint8Array(brut.length + ident.length); sel.set(brut); sel.set(new TextEncoder().encode(ident), brut.length);
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(mdp.normalize("NFC")), "PBKDF2", false, ["deriveBits"]);
+  return new Uint8Array(await crypto.subtle.deriveBits({name: "PBKDF2", salt: sel, iterations: 200000, hash: "SHA-256"}, base, 128));
+}
 async function recevoir(adresse, ident, brut) {
   if (brut.length !== 16) { dire("Lien incomplet : la clé (après le #) manque."); return; }
+  const mdp = $("zmdp").hidden ? "" : $("mdp").value;
+  if (!$("zmdp").hidden && !mdp) { dire("Saisis le mot de passe."); return; }
   $("aller").disabled = true; dire("Connexion à l'appareil qui héberge le fichier…");
   let r; try { r = await fetch(adresse, {cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer"}); } catch (e) { dire("Connexion impossible."); $("aller").disabled = false; return; }
   if (!r.ok) { dire(await r.text()); $("aller").disabled = false; return; }
-  const cle = await crypto.subtle.importKey("raw", brut, "AES-GCM", false, ["decrypt"]), aad = new TextEncoder().encode(ident);
-  const lecteur = r.body.getReader(), morceaux = []; let tampon = new Uint8Array(0), n = 0, meta = null, recu = 0, fini = false;
+  const aad = new TextEncoder().encode(ident);
+  const lecteur = r.body.getReader(), morceaux = []; let tampon = new Uint8Array(0), n = 0, meta = null, recu = 0, fini = false, cle = null, protege = false;
   const ouvrir = async data => { const iv = new Uint8Array(12); new DataView(iv.buffer).setUint32(8, n % 4294967296); new DataView(iv.buffer).setUint32(4, Math.floor(n / 4294967296)); n++;
     return new Uint8Array(await crypto.subtle.decrypt({name: "AES-GCM", iv, additionalData: aad}, cle, data)); };
   try {
@@ -24,6 +32,12 @@ async function recevoir(adresse, ident, brut) {
       const t = new Uint8Array(tampon.length + value.length); t.set(tampon); t.set(value, tampon.length); tampon = t;
       while (tampon.length >= 4) {
         const l = new DataView(tampon.buffer, tampon.byteOffset).getUint32(0);
+        if (l === 4294967294 && cle === null && !protege) {          // l'appareil annonce : ce lien demande un mot de passe
+          protege = true; tampon = tampon.slice(4);
+          if (!mdp) { try { await lecteur.cancel(); } catch (e) {} $("zmdp").hidden = false; $("aller").disabled = false; dire("Ce fichier est protégé par un mot de passe."); $("mdp").focus(); return; }
+          continue;
+        }
+        if (cle === null) cle = await crypto.subtle.importKey("raw", protege ? await cleProtegee(brut, ident, mdp) : brut, "AES-GCM", false, ["decrypt"]);
         if (l === 0) { fini = true; break; }
         if (l > 1048576) throw new Error("flux");
         if (tampon.length < 4 + l) break;
@@ -32,7 +46,7 @@ async function recevoir(adresse, ident, brut) {
         else { morceaux.push(clair); recu += clair.length; dire("Réception : " + Math.floor(100 * recu / Math.max(1, meta.taille)) + " %"); }
       }
     }
-  } catch (e) { dire("Déchiffrement impossible : le lien n'est pas le bon, ou le transfert a été coupé."); $("aller").disabled = false; return; }
+  } catch (e) { try { await lecteur.cancel(); } catch (e2) {} dire(protege && meta === null ? "Mot de passe incorrect." : "Déchiffrement impossible : le lien n'est pas le bon, ou le transfert a été coupé."); $("aller").disabled = false; return; }
   if (!fini || meta === null || recu !== meta.taille) { dire("Transfert interrompu : l'appareil qui héberge le fichier s'est déconnecté. Réessaie."); $("aller").disabled = false; return; }
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(morceaux)); a.download = String(meta.nom).replace(/[\/:*?"<>|\x00-\x1f]/g, "_") || "fichier"; document.body.append(a); a.click();
   dire("Fichier reçu et déchiffré dans ton navigateur.");
